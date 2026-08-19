@@ -1,0 +1,41 @@
+# Python virtuális környezet
+
+.venv/
+venv/
+env/
+
+# Python gyorsítótár
+
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Jupyter
+
+.ipynb_checkpoints/
+
+# Tesztelési és típusellenőrzési gyorsítótár
+
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# VS Code
+
+.vscode/
+
+# Operációs rendszer fájljai
+
+.DS_Store
+Thumbs.db
+
+# Privát dokumentáció
+
+docs_private/
+
+# Környezeti változók és titkos adatok
+
+.env
+.env.*
+

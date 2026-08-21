@@ -8,7 +8,7 @@ class Request:
         header_data, separator, body_data = raw_data.partition(HEADER_SEPARATOR)
 
         self.body = body_data
-
+    
         header_text = header_data.decode("utf-8")
         header_lines = header_text.splitlines()
 
@@ -19,4 +19,7 @@ class Request:
             name, value = line.split(":", 1)
             self.headers[name.strip()] = value.strip()
 
-        
+        self.path, separator, self.query_string = self.target.partition("?")
+
+
+    

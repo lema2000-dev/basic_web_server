@@ -1,65 +1,189 @@
 import socket
+import threading
 
-from .request import Request
-from .response import Response
-from .http import HEADER_SEPARATOR
+from .config import ServerConfig
+from .connection import ClientConnection
 
 class Server:
-    def __init__(self, application, host="127.0.0.1", port=5000):
-        self.host = host
-        self.port = port
+    def __init__(self, application, config=None):
+        self.host = ""
+        self.port = 0
         self.application = application
 
-    def run(self):
+        if config is None:
+            config = ServerConfig()
+
+        self.config = config
+        self._socket = None
+        self._running = False
+
+        self._client_threads = []
+        self._client_threads_lock = threading.Lock()
+
+        self._server_thread = None
+
+        self._commands = {
+            "help": (self._command_help, "Show available commands"),
+            "status": (self._command_status, "Show server status"),
+            "clients": (self._command_clients, "Show active client connections"),
+            "config": (self._command_config, "Show current server configuration"),
+            "run": (self._command_run, "Run the server"),
+            "stop": (self._command_stop, "Stop the server gracefully"),
+        }
+
+    def start_console(self):
+        self._common_loop()
+
+    def _common_loop(self):
+        while True:
+            try:
+                command = input("> ").strip().lower()
+                command_data = self._commands.get(command)
+                if command_data is None:
+                    print(f"Unknown command: {command!r}. Type 'help' for available commands.")
+                    continue
+
+                command_function, _ = command_data
+                command_function()
+            except (KeyboardInterrupt, EOFError):
+                self._stop()
+                print("\nExiting server console.")
+                break
+
+    def _server(self):
         try:
-            server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            server_socket.bind((self.host, self.port))
-            server_socket.listen()
+            self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
-            print(f"Server is listening on http://{self.host}:{self.port}")
+            self._socket.bind((self.host, self.port))
+            self._socket.listen()
+            self._socket.settimeout(self.config.accept_timeout)
 
-            while True:
-                client_socket, client_address = server_socket.accept()
+            self._running = True
+            host, port = self._socket.getsockname()
+            print(f"Server is listening on http://{host}:{port}")
+
+            while self._running:
+                try:
+                    client_socket, client_address = self._socket.accept()
+
+                except socket.timeout:
+                    continue
+                
+                except OSError as e:
+                    if not self._running:
+                        break
+
+                    raise
+
                 print("Connection received from:", client_address)
+                client_thread = threading.Thread(
+                    target=self._handle_client, args=(client_socket, client_address)
+                )
+                with self._client_threads_lock:
+                    self._client_threads.append((client_thread, client_address))
+                client_thread.start()
 
-                request_data = self._receive_http_request(client_socket)
+        finally:
+            self._running = False
+            if self._socket is not None:
+                self._socket.close()
+                self._socket = None
 
-                request = Request(request_data)
-                response = self.application(request)
+            with self._client_threads_lock:
+                client_threads_copy = [t for t, _ in self._client_threads]
 
-                client_socket.sendall(response.to_bytes())
-                client_socket.close()
-        except KeyboardInterrupt:
-            print("\nServer is shutting down.")
+            for client_thread in client_threads_copy:
+                client_thread.join()
 
+            print("Server stopped.")
 
-    def _receive_http_request(self, client_socket):
-        data = b""
+    def _run(self, host="127.0.0.1", port=0):
+        self.host = host
+        self.port = port
+        self._server_thread = threading.Thread(target=self._server, name="server-thread")
+        self._server_thread.start()
 
-        while HEADER_SEPARATOR not in data:
-            chunk = client_socket.recv(4096)
-            if not chunk:
-                break
-            data += chunk
+    def _stop(self):
+        self._running = False
+        if self._socket is not None:
+            self._socket.close()
 
-        header_data, separator, body_data = data.partition(HEADER_SEPARATOR)
+    def _handle_client(self, client_socket, client_address):
+        try:
+            with client_socket:
+                connection = ClientConnection(client_socket, client_address, self.application, self.config)
+                connection.handle()
+        finally:
+            current_thread = threading.current_thread()
 
-        content_length = 0
-        header_text = header_data.decode("utf-8")
+            with self._client_threads_lock:
+                self._client_threads = [(t, addr) for t, addr in self._client_threads if t is not current_thread]
 
-        for line in header_text.splitlines():
-            if line.lower().startswith("content-length:"):
-                content_length = int(line.split(":", 1)[1].strip())
-                break
+    def _command_help(self):
+        print("Available commands:")
+        for name, (_, description) in self._commands.items():
+            print(f"  {name:<10} {description}")
 
-        while len(body_data) < content_length:
-            chunk = client_socket.recv(4096)
-            if not chunk:
-                break
-            body_data += chunk
+    def _command_status(self):
+        if self._socket is not None:
+            host, port = self._socket.getsockname()
+        else:
+            host, port = self.host, self.port
 
-        return header_data + HEADER_SEPARATOR + body_data
+        with self._client_threads_lock:
+            active_clients = len(self._client_threads)
 
+        print("Server status:")
+        print(f"  Running: {self._running}")
+        print(f"  Address: {host}:{port}")
+        print(f"  Active clients: {active_clients}")
 
+    def _command_config(self):
+        print("Server configuration:")
+        print(f"  Client timeout: {self.config.client_timeout} seconds")
+        print(f"  Accept timeout: {self.config.accept_timeout} seconds")
+        print(f"  Receive buffer size: {self.config.recv_buffer_size} bytes")
+        print(f"  Max request size: {self.config.max_request_size} bytes")
+
+    def _command_clients(self):
+        with self._client_threads_lock:
+            client_threads = list(
+                self._client_threads
+            )
+
+        if not client_threads:
+            print("No active client connections.")
+            return
+
+        print(
+            f"Active client connections: "
+            f"{len(client_threads)}"
+        )
+
+        for client_thread, client_address in client_threads:
+            host, port = client_address
+            print(
+                f"  {host}:{port} - "
+                f"  {client_thread.name} "
+                f"(alive={client_thread.is_alive()})"
+            )
+
+    def _command_run(self):
+        if self._server_thread is not None and self._server_thread.is_alive():
+            print("Server is already running.")
+            return
         
+        host = input("Enter host (default: 127.0.0.1): ") or "127.0.0.1"
+        port = input("Enter port (default: 0): ") or "0"
+        port = int(port)
+
+        self._run(host=host, port=port)
+
+    def _command_stop(self):
+        if not self._running:
+            print("Server is not running.")
+            return
+        print("Stopping the server...")
+        self._stop()
+
         

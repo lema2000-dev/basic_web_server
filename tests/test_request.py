@@ -22,3 +22,29 @@ def test_request_parsing():
     assert request.headers["Content-Length"] == "5"
 
     assert request.body == b"Hello"
+
+def test_request_with_query_string():
+    raw_request = (
+        b"GET /products?category=books&page=2 HTTP/1.1\r\n"
+        b"Host: localhost\r\n"
+        b"\r\n"
+    )
+
+    request = Request(raw_request)
+
+    assert request.target == "/products?category=books&page=2"
+    assert request.path == "/products"
+    assert request.query_string == "category=books&page=2"
+
+def test_request_without_query_string():
+    raw_request = (
+        b"GET /products HTTP/1.1\r\n"
+        b"Host: localhost\r\n"
+        b"\r\n"
+    )
+
+    request = Request(raw_request)
+
+    assert request.target == "/products"
+    assert request.path == "/products"
+    assert request.query_string == ""

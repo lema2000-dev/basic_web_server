@@ -1,7 +1,10 @@
 import socket
 
+import pytest
+
 from basic_web_server import ServerConfig
 from basic_web_server.connection import ClientConnection
+from basic_web_server.exceptions import BadRequestError, RequestTimeoutError, RequestTooLargeError
 
 def application(request):
     return (
@@ -220,3 +223,239 @@ def test_connection_uses_configured_recv_buffer_size():
     connection._receive_http_request()
 
     assert fake_socket.recv_sizes[0] == 128
+
+def test_receive_http_request_returns_none_on_clean_eof():
+    fake_socket = FakeSocket([])
+
+    connection = ClientConnection(fake_socket, "fake_address", application, TEST_CONFIG)
+
+    result = connection._receive_http_request()
+
+    assert result is b""
+
+def test_receive_http_request_raises_on_incomplete_request():
+    raw_data = (
+        b"GET / HTTP/1.1\r\n"
+        b"Host: localhost\r\n"
+    )
+
+    fake_socket = FakeSocket([raw_data])
+    connection = ClientConnection(fake_socket, "fake_address", application, TEST_CONFIG)
+
+    with pytest.raises(BadRequestError) as error_info:
+        connection._receive_http_request()
+
+    assert "Client closed connection before completing the HTTP request." in str(error_info.value)
+
+def test_receive_http_request_raises_on_incomplete_body():
+    raw_data = (
+        b"POST / HTTP/1.1\r\n"
+        b"Host: localhost\r\n"
+        b"Content-Length: 10\r\n"
+        b"\r\n"
+        b"12345"
+    )
+
+    fake_socket = FakeSocket([raw_data])
+    connection = ClientConnection(fake_socket, "fake_address", application, TEST_CONFIG)
+
+    with pytest.raises(BadRequestError) as error_info:
+        connection._receive_http_request()
+
+    assert "Client closed connection before completing the HTTP request body." in str(error_info.value)
+
+def test_receive_http_request_raises_on_invalid_content_length():
+    raw_data = (
+        b"POST / HTTP/1.1\r\n"
+        b"Host: localhost\r\n"
+        b"Content-Length: invalid\r\n"
+        b"\r\n"
+    )
+
+    fake_socket = FakeSocket([raw_data])
+    connection = ClientConnection(fake_socket, "fake_address", application, TEST_CONFIG)
+
+    with pytest.raises(BadRequestError) as error_info:
+        connection._receive_http_request()
+
+    assert "Invalid Content-Length header value." in str(error_info.value)
+
+def test_receive_http_request_raises_on_negative_content_length():
+    raw_data = (
+        b"POST / HTTP/1.1\r\n"
+        b"Host: localhost\r\n"
+        b"Content-Length: -5\r\n"
+        b"\r\n"
+    )
+
+    fake_socket = FakeSocket([raw_data])
+    connection = ClientConnection(fake_socket, "fake_address", application, TEST_CONFIG)
+
+    with pytest.raises(BadRequestError) as error_info:
+        connection._receive_http_request()
+
+    assert "Content-Length cannot be negative." in str(error_info.value)
+
+def test_receive_http_request_raises_on_header_exceeding_max_size():
+    raw_data = (
+        b"GET / HTTP/1.1\r\n"
+        b"Host: localhost\r\n"
+        + b"A" * (TEST_CONFIG.max_request_size + 1)
+        + b"\r\n"
+    )
+
+    fake_socket = FakeSocket([raw_data])
+    connection = ClientConnection(fake_socket, "fake_address", application, TEST_CONFIG)
+
+    with pytest.raises(RequestTooLargeError) as error_info:
+        connection._receive_http_request()
+
+    assert error_info.value.close_connection is True
+    assert error_info.value.status_code == 431
+
+def test_receive_http_request_raises_when_body_exceeds_max_size():
+    raw_data = (
+        b"POST / HTTP/1.1\r\n"
+        b"Host: localhost\r\n"
+        b"Content-Length:" + str(TEST_CONFIG.max_request_size + 1).encode() + b"\r\n"
+        b"\r\n"
+    )
+
+    fake_socket = FakeSocket([raw_data])
+    connection = ClientConnection(fake_socket, "fake_address", application, TEST_CONFIG)
+
+    with pytest.raises(RequestTooLargeError) as error_info:
+        connection._receive_http_request()
+
+    assert error_info.value.close_connection is True
+    assert error_info.value.status_code == 431
+
+def test_idle_connection_timeout_returns_empty():
+    fake_socket = TimeoutSocket([])
+
+    connection = ClientConnection(fake_socket, "fake_address", application, TEST_CONFIG)
+
+    result = connection._receive_http_request()
+
+    assert result == b""
+
+class TimeoutAfterChunksSocket(FakeSocket):
+
+    def recv(self, buffer_size):
+        if self.chunks:
+            return super().recv(buffer_size)
+
+        raise socket.timeout("Simulated timeout after chunks")
+
+def test_timeout_during_incomplete_header():
+    raw_data = (
+        b"GET / HTTP/1.1\r\n"
+        b"Host: localhost\r\n"
+    )
+
+    fake_socket = TimeoutAfterChunksSocket([raw_data])
+    connection = ClientConnection(fake_socket, "fake_address", application, TEST_CONFIG)
+
+    with pytest.raises(RequestTimeoutError) as error_info:
+        connection._receive_http_request()
+
+    assert error_info.value.close_connection is True
+    assert error_info.value.status_code == 408
+
+def test_timeout_during_incomplete_body():
+    raw_data = (
+        b"POST / HTTP/1.1\r\n"
+        b"Host: localhost\r\n"
+        b"Content-Length: 10\r\n"
+        b"\r\n"
+        b"12345"
+    )
+
+    fake_socket = TimeoutAfterChunksSocket([raw_data])
+    connection = ClientConnection(fake_socket, "fake_address", application, TEST_CONFIG)
+
+    with pytest.raises(RequestTimeoutError) as error_info:
+        connection._receive_http_request()
+
+    assert error_info.value.close_connection is True
+    assert error_info.value.status_code == 408
+
+def test_receive_http_request_raises_on_multiple_content_length_headers():
+    raw_data = (
+        b"POST / HTTP/1.1\r\n"
+        b"Host: localhost\r\n"
+        b"Content-Length: 5\r\n"
+        b"Content-Length: 10\r\n"
+        b"\r\n"
+    )
+
+    fake_socket = FakeSocket([raw_data])
+    connection = ClientConnection(fake_socket, "fake_address", application, TEST_CONFIG)
+
+    with pytest.raises(BadRequestError) as error_info:
+        connection._receive_http_request()
+
+    assert "Multiple Content-Length headers are not allowed." in str(error_info.value)
+    assert error_info.value.close_connection is True
+
+def test_receive_http_request_rejects_duplicate_equal_content_length():
+    raw_data = (
+        b"POST / HTTP/1.1\r\n"
+        b"Host: localhost\r\n"
+        b"Content-Length: 5\r\n"
+        b"Content-Length: 5\r\n"
+        b"\r\n"
+    )   
+
+    fake_socket = FakeSocket([raw_data])
+    connection = ClientConnection(fake_socket, "fake_address", application, TEST_CONFIG)
+
+    with pytest.raises(BadRequestError) as error_info:
+        connection._receive_http_request()
+
+    assert "Multiple Content-Length headers are not allowed." in str(error_info.value)
+    assert error_info.value.close_connection is True
+
+def test_make_response_from_body():
+    fake_socket = FakeSocket([])
+    connection = ClientConnection(fake_socket, "fake_address", application, TEST_CONFIG)
+
+    response = connection._make_response("Hello World")
+
+    assert response.status_code == 200
+    assert response.body == b"Hello World"
+    assert response.headers == []
+
+def test_make_response_from_body_and_status():
+    fake_socket = FakeSocket([])
+    connection = ClientConnection(fake_socket, "fake_address", application, TEST_CONFIG)
+
+    response = connection._make_response(("Not Found", 404))
+
+    assert response.status_code == 404
+    assert response.body == b"Not Found"
+    assert response.headers == []
+
+def test_make_response_from_body_status_and_headers():
+    fake_socket = FakeSocket([])
+    connection = ClientConnection(fake_socket, "fake_address", application, TEST_CONFIG)
+
+    response = connection._make_response(
+        ("Hello", 200, {"Content-Type": "text/plain", "X-Test": "example"})
+    )
+
+    assert response.status_code == 200
+    assert response.body == b"Hello"
+    assert response.headers == [
+        ("Content-Type", "text/plain"),
+        ("X-Test", "example")
+    ]
+
+def test_make_response_raises_on_invalid_tuple_length():
+    fake_socket = FakeSocket([])
+    connection = ClientConnection(fake_socket, "fake_address", application, TEST_CONFIG)
+
+    with pytest.raises(Exception) as error_info:
+        connection._make_response(("Hello", 200, {"Content-Type": "text/plain"}, "extra"))
+
+    assert "Application must return body, (body, status_code) or (body, status_code, headers) tuple." in str(error_info.value)

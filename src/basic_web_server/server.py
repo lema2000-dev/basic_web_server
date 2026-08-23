@@ -29,13 +29,15 @@ class Server:
             "config": (self._command_config, "Show current server configuration"),
             "run": (self._command_run, "Run the server"),
             "stop": (self._command_stop, "Stop the server gracefully"),
+            "quit": (self._command_quit, "Stop the server (if running) and exit the console"),
         }
 
     def start_console(self):
         self._common_loop()
 
     def _common_loop(self):
-        while True:
+        loop_running = True
+        while loop_running:
             try:
                 command = input("> ").strip().lower()
                 command_data = self._commands.get(command)
@@ -45,6 +47,9 @@ class Server:
 
                 command_function, _ = command_data
                 command_function()
+
+                if command == "quit":
+                    loop_running = False
             except (KeyboardInterrupt, EOFError):
                 self._stop()
                 print("\nExiting server console.")
@@ -186,4 +191,7 @@ class Server:
         print("Stopping the server...")
         self._stop()
 
+    def _command_quit(self):
+        self._stop()
+        print("Exiting server console.")
         

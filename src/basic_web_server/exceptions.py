@@ -29,3 +29,6 @@ class InternalServerError(HTTPError):
 class ApplicationError(InternalServerError):
     pass
 
+class ClientConnectionError(Exception):
+    pass
+

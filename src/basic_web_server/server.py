@@ -1,8 +1,13 @@
+import re
 import socket
 import threading
+import errno
+import ipaddress
 
 from .config import ServerConfig
 from .connection import ClientConnection
+
+RECOVERABLE_ACCEPT_ERRNOS = {errno.ECONNABORTED}
 
 class Server:
     def __init__(self, application, config=None):
@@ -57,11 +62,14 @@ class Server:
 
     def _server(self):
         try:
-            self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-
-            self._socket.bind((self.host, self.port))
-            self._socket.listen()
-            self._socket.settimeout(self.config.accept_timeout)
+            try:
+                self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self._socket.bind((self.host, self.port))
+                self._socket.listen()
+                self._socket.settimeout(self.config.accept_timeout)
+            except OSError as error:
+                print(f"Failed to start server on {self.host}:{self.port}: {error}")
+                return
 
             self._running = True
             host, port = self._socket.getsockname()
@@ -74,19 +82,31 @@ class Server:
                 except socket.timeout:
                     continue
                 
-                except OSError as e:
+                except OSError as error:
                     if not self._running:
                         break
+                    if error.errno in RECOVERABLE_ACCEPT_ERRNOS:
+                        print(f"Recoverable accept error: {error}. Continuing to accept new connections.")
+                        continue   
+                    print(f'Fatal error whilr accepting connection: {error}')
+                    break
 
-                    raise
-
-                print("Connection received from:", client_address)
                 client_thread = threading.Thread(
                     target=self._handle_client, args=(client_socket, client_address)
                 )
                 with self._client_threads_lock:
                     self._client_threads.append((client_thread, client_address))
-                client_thread.start()
+                
+                try:
+                    client_thread.start()
+                except RuntimeError as error:
+                    print(f"Failed to start client thread for {client_address}: {error}")
+                    with self._client_threads_lock:
+                        self._client_threads = [
+                            (t, addr) for t, addr in self._client_threads if t is not client_thread
+                        ]
+                    client_socket.close()
+                    continue
 
         finally:
             self._running = False
@@ -106,7 +126,11 @@ class Server:
         self.host = host
         self.port = port
         self._server_thread = threading.Thread(target=self._server, name="server-thread")
-        self._server_thread.start()
+        try:
+            self._server_thread.start()
+        except RuntimeError as error:
+            print(f"Failed to start server thread: {error}")
+            self._server_thread = None
 
     def _stop(self):
         self._running = False
@@ -179,8 +203,22 @@ class Server:
             return
         
         host = input("Enter host (default: 127.0.0.1): ") or "127.0.0.1"
+        try:
+            ipaddress.IPv4Address(host)
+        except ipaddress.AddressValueError:
+            print(f'Invalid IPv4 address: {host!r}. Please enter a valid IPv4 address.')
+            return
+
         port = input("Enter port (default: 0): ") or "0"
-        port = int(port)
+
+        try:
+            port = int(port)
+        except ValueError:
+            print("Invalid port. Port must be an integer between 0 and 65535.")
+            return
+        if not (0 <= port <= 65535):
+            print("Invalid port. Port must be between 0 and 65535.")
+            return
 
         self._run(host=host, port=port)
 

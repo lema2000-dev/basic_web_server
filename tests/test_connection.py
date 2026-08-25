@@ -1,8 +1,10 @@
 import socket
+from typing import Mapping
 
 import pytest
 
 from basic_web_server import ServerConfig
+from basic_web_server import connection
 from basic_web_server.connection import ClientConnection
 from basic_web_server.exceptions import BadRequestError, RequestTimeoutError, RequestTooLargeError
 
@@ -55,6 +57,10 @@ class FakeSocket:
 class TimeoutSocket(FakeSocket):
     def recv(self, buffer_size):
         raise socket.timeout("Simulated timeout")
+
+class SendErrorSocket(FakeSocket):
+    def sendall(self, data):
+        raise BrokenPipeError("Simulated broken pipe")
 
 def test_two_requests_in_single_chunk():
     raw_data = (
@@ -459,3 +465,28 @@ def test_make_response_raises_on_invalid_tuple_length():
         connection._make_response(("Hello", 200, {"Content-Type": "text/plain"}, "extra"))
 
     assert "Application must return body, (body, status_code) or (body, status_code, headers) tuple." in str(error_info.value)
+
+def test_connection_stops_after_sendall_error():
+    raw_data = (
+        b"GET /first HTTP/1.1\r\n"
+        b"Host: localhost\r\n"
+        b"\r\n"
+        b"GET /second HTTP/1.1\r\n"
+        b"Host: localhost\r\n"
+        b"\r\n"
+    )
+
+    fake_socket = SendErrorSocket([raw_data])
+
+    connection = ClientConnection(
+        client_socket=fake_socket,
+        client_address="fake_address",
+        application=application,
+        config=TEST_CONFIG
+    )
+
+    connection.handle()
+
+    assert (
+        b"GET /second HTTP/1.1" in connection.buffer
+    )

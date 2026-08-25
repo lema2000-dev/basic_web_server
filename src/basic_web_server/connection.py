@@ -4,7 +4,7 @@ from .request import Request
 from .response import Response
 from .http import HEADER_SEPARATOR
 
-from .exceptions import ApplicationError, BadRequestError, RequestTooLargeError, RequestTimeoutError
+from .exceptions import ApplicationError, BadRequestError, RequestTooLargeError, RequestTimeoutError, ClientConnectionError
 
 class ClientConnection:
 
@@ -18,32 +18,32 @@ class ClientConnection:
         self.socket.settimeout(self.config.client_timeout)
 
     def handle(self):
-        try:
-            while True:
-                request_data = self._receive_http_request()
+        while True:
+            request_data = self._receive_http_request()
 
-                if not request_data:
-                    print(f"No more data received. Closing connection from {self.client_address}.")
-                    break
+            if not request_data:
+                print(f"No more data received. Closing connection from {self.client_address}.")
+                break
 
-                request = Request(request_data)
-                result = self.application(request)
-                response = self._make_response(result)
+            request = Request(request_data)
+            result = self.application(request)
+            response = self._make_response(result)
 
+            try:
                 self.socket.sendall(response.to_bytes())
+            except OSError as e:
+                print(f"Error sending response to {self.client_address}: {e}. Closing connection.")
+                break
 
-                connection_header = request.get_header("Connection", "").lower()
-                if connection_header == "close":
-                    print(f"Connection header is 'close'. Closing connection from {self.client_address}.")
-                    break
-        except socket.timeout:
-            print(f"Connection from {self.client_address} timed out.")
-            return
+            connection_header = request.get_header("Connection", "").lower()
+            if connection_header == "close":
+                print(f"Connection header is 'close'. Closing connection from {self.client_address}.")
+                break
 
     def _receive_http_request(self):
         while HEADER_SEPARATOR not in self.buffer:
             try:
-                chunk = self.socket.recv(self.config.recv_buffer_size)
+                chunk = self._recv()
             except socket.timeout as error:
                 if self.buffer:
                     raise RequestTimeoutError("Client timed out before completing the HTTP request.", close_connection=True) from error
@@ -91,7 +91,7 @@ class ClientConnection:
 
         while body_length_available < content_length:
             try:
-                chunk = self.socket.recv(self.config.recv_buffer_size)
+                chunk = self._recv()
             except socket.timeout as error:
                 raise RequestTimeoutError("Client timed out before completing the HTTP request.", close_connection=True) from error
 
@@ -126,4 +126,10 @@ class ClientConnection:
 
         return Response(body=body, status_code=status_code, headers=headers)
         
-
+    def _recv(self):
+        try:
+            return self.socket.recv(self.config.recv_buffer_size)
+        except socket.timeout:
+            raise
+        except OSError as error:
+            raise ClientConnectionError(f"Socket receive failed {error}") from error

@@ -1,8 +1,63 @@
+from errno import EBADF
 import threading
 import time
 import socket
+import errno
 
 from basic_web_server import Server
+
+class RecoverableAcceptErrorSocket:
+    def __init__(self, server):
+        self.accept_calls = 0
+        self.closed = False
+        self.server = server
+
+    def bind(self, address):
+        pass
+
+    def listen(self):
+        pass
+
+    def settimeout(self, timeout):
+        pass
+
+    def getsockname(self):
+        return ("127.0.0.1", 5000)
+
+    def accept(self):
+        self.accept_calls += 1
+        if self.accept_calls == 1:
+            raise OSError(errno.ECONNABORTED, "Simulated aborted connect")
+        self.server._running = False
+
+        raise OSError(errno.EBADF, "Simulated closed socket")
+    
+    def close(self):
+        self.closed = True
+
+class FatalAcceptErrorSocket:
+    def __init__(self):
+        self.accept_calls = 0
+        self.closed = False
+
+    def bind(self, address):
+        pass
+
+    def listen(self):
+        pass
+
+    def settimeout(self, timeout):
+        pass
+
+    def getsockname(self):
+        return ("127.0.0.1", 5000)
+
+    def accept(self):
+        self.accept_calls += 1
+        raise OSError(errno.EBADF, "Simulated bad file descriptor")
+
+    def close(self):
+        self.closed = True
 
 def application(request):
     return "Hello"
@@ -17,6 +72,74 @@ def test_server_stop():
     server._server_thread.join(timeout=1)
 
     assert not server._server_thread.is_alive()
+
+class BindErrorSocket:
+    def __init__(self):
+        self.closed = False
+
+    def bind(self, address):
+        raise OSError(errno.EADDRINUSE, "Simulated address in use")
+
+    def listen(self):
+        pass
+
+    def settimeout(self, timeout):
+        pass
+
+    def close(self):
+        self.closed = True
+
+class StartErrorThread:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def start(self):
+        raise RuntimeError("Simulated thread start failure ")
+
+class FakeClientSocket:
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+class ClientStartErrorThread:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def start(self):
+        raise RuntimeError("Simulated client thread start failure")
+
+class ClientThreadErrorListeningSocket:
+    def __init__(self, server, client_socket):
+        self.server = server
+        self.client_socket = client_socket
+        self.accept_calls = 0
+        self.closed = False
+
+    def bind(self, address):
+        pass
+
+    def listen(self):
+        pass
+
+    def settimeout(self, timeout):
+        pass
+
+    def getsockname(self):
+        return ("127.0.0.1", 5000)
+    
+    def accept(self):
+        self.accept_calls += 1
+        if self.accept_calls == 1:
+            return (self.client_socket, ("127.0.0.1", 12345))
+
+        self.server._running = False
+
+        raise OSError(errno.EBADF, "Simulated closed socket")
+    
+    def close(self):
+        self.closed = True
 
 def test_finished_client_thread_is_removed():
     server = Server(application)
@@ -91,19 +214,14 @@ def test_server_waits_for_client_threads_on_shutdown():
         time.sleep(0.2)
         worker_can_finish.set()
 
-    release_thread = threading.Thread(
-        target=release_worker_later
-    )
+    release_thread = threading.Thread(target=release_worker_later)
 
     release_thread.start()
 
     start = time.monotonic()
 
     with server._client_threads_lock:
-        client_threads = [
-            thread
-            for thread, _ in server._client_threads
-        ]
+        client_threads = [thread for thread, _ in server._client_threads]
 
     for thread in client_threads:
         thread.join()
@@ -115,3 +233,148 @@ def test_server_waits_for_client_threads_on_shutdown():
 
     release_thread.join()
 
+def test_server_continues_after_recoverable_accept_error(monkeypatch):
+    server = Server(application)
+
+    recoverable_socket = RecoverableAcceptErrorSocket(server)
+
+    monkeypatch.setattr(socket, "socket", lambda *args, **kwargs: recoverable_socket)
+
+    server._server()
+
+    assert recoverable_socket.accept_calls == 2
+    assert recoverable_socket.closed
+    assert not server._running
+
+def test_server_stops_after_fatal_accept_error(monkeypatch):
+    server = Server(application)
+
+    fatal_socket = FatalAcceptErrorSocket()
+
+    monkeypatch.setattr(socket, "socket", lambda *args, **kwargs: fatal_socket)
+
+    server._server()
+
+    assert fatal_socket.accept_calls == 1
+    assert fatal_socket.closed
+    assert not server._running
+    assert server._socket is None
+
+def test_server_handles_bind_error(monkeypatch):
+    server = Server(application)
+
+    bind_error_socket = BindErrorSocket()
+
+    monkeypatch.setattr(socket, "socket", lambda *args, **kwargs: bind_error_socket)
+
+    server._server()
+
+    assert bind_error_socket.closed
+    assert not server._running
+    assert server._socket is None
+
+def test_run_handles_server_thread_start_error(monkeypatch):
+    server = Server(application)
+
+    monkeypatch.setattr(threading, "Thread", StartErrorThread)
+
+    server._run(host="127.0.0.1", port=5000)
+
+    assert not server._running
+    assert server._server_thread is None
+
+def test_server_handles_client_thread_start_error(monkeypatch):
+    server = Server(application)
+
+    fake_client_socket = FakeClientSocket()
+
+    client_thread_error_socket = ClientThreadErrorListeningSocket(server, fake_client_socket)
+
+    monkeypatch.setattr(socket, "socket", lambda *args, **kwargs: client_thread_error_socket)
+    monkeypatch.setattr(threading, "Thread", ClientStartErrorThread)
+
+    server._server()
+
+    assert fake_client_socket.closed
+    assert server._client_threads == []
+    assert client_thread_error_socket.accept_calls == 2
+    assert client_thread_error_socket.closed
+    assert not server._running
+
+def test_command_run_rejects_invalid_ip(monkeypatch):
+    server = Server(application)
+
+    inputs = iter(["invalid_ip", "0"])
+
+    monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
+
+    run_called = False
+
+    def fake_run(host, port):
+        nonlocal run_called
+        run_called = True
+
+    monkeypatch.setattr(server, "_run", fake_run)
+
+    server._command_run()
+
+    assert not run_called
+
+def test_command_run_rejects_integer_port(monkeypatch):
+    server = Server(application)
+
+    inputs = iter(["127.0.0.1", "invalid_port"])
+
+    monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
+
+    run_called = False
+
+    def fake_run(host, port):
+        nonlocal run_called
+        run_called = True
+
+    monkeypatch.setattr(server, "_run", fake_run)
+
+    server._command_run()
+
+    assert not run_called
+
+def test_command_run_rejects_out_of_range_port(monkeypatch):
+    server = Server(application)
+
+    inputs = iter(["127.0.0.1", "70000"])
+
+    monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
+
+    run_called = False
+
+    def fake_run(host, port):
+        nonlocal run_called
+        run_called = True
+
+    monkeypatch.setattr(server, "_run", fake_run)
+
+    server._command_run()
+
+    assert not run_called
+
+def test_command_run_accepts_valid_input(monkeypatch):
+    server = Server(application)
+
+    inputs = iter(["127.0.0.1", "5000"])
+
+    monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
+
+    received_arguments = {}
+
+    def fake_run(host, port):
+        received_arguments["host"] = host
+        received_arguments["port"] = port
+
+    monkeypatch.setattr(server, "_run", fake_run)
+
+    server._command_run()
+
+    assert received_arguments == {"host": "127.0.0.1", "port": 5000}
+
+    

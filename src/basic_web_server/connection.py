@@ -4,41 +4,70 @@ from .request import Request
 from .response import Response
 from .http import HEADER_SEPARATOR
 
-from .exceptions import ApplicationError, BadRequestError, RequestTooLargeError, RequestTimeoutError, ClientConnectionError
+from .exceptions import ApplicationError, BadRequestError, RequestTooLargeError, RequestTimeoutError, ClientConnectionError, HTTPError
 
 class ClientConnection:
 
-    def __init__(self, client_socket, client_address, application, config):
+    def __init__(self, client_socket, client_address, application, config, logger):
         self.socket = client_socket
         self.client_address = client_address
         self.config = config
         self.application = application
+        self.logger = logger
         self.buffer = b""
 
         self.socket.settimeout(self.config.client_timeout)
 
     def handle(self):
         while True:
-            request_data = self._receive_http_request()
-
-            if not request_data:
-                print(f"No more data received. Closing connection from {self.client_address}.")
-                break
-
-            request = Request(request_data)
-            result = self.application(request)
-            response = self._make_response(result)
-
             try:
-                self.socket.sendall(response.to_bytes())
-            except OSError as e:
-                print(f"Error sending response to {self.client_address}: {e}. Closing connection.")
-                break
+                request_data = self._receive_http_request()
 
-            connection_header = request.get_header("Connection", "").lower()
-            if connection_header == "close":
-                print(f"Connection header is 'close'. Closing connection from {self.client_address}.")
+                if not request_data:
+                    self.logger.info("No more data received from %s. Closing connection.", self.client_address)
+                    break
+
+                request = Request(request_data)
+                try:
+                    result = self.application(request)
+                except Exception:
+                    self.logger.exception("Unhandled application exception for %s.", self.client_address)
+                    error_response = self._make_error_response(500, "Internal Server Error", close_connection=False)
+                    if not self._send_response(error_response):
+                        break
+                    continue
+
+                response = self._make_response(result)
+
+                if not self._send_response(response):
+                    break
+
+                connection_header = request.get_header("Connection", "").lower()
+                if connection_header == "close":
+                    self.logger.info("Client %s requested connection close.", self.client_address)
+                    break
+            except ClientConnectionError as error:
+                self.logger.warning("Client connection error from %s: %s. Closing connection.", self.client_address, error)
                 break
+            
+            except ApplicationError as error:
+                self.logger.error("Application response error for %s: %s.", self.client_address, error)
+                error_response = self._make_error_response(500, "Internal Server Error", close_connection=False)
+                if not self._send_response(error_response):
+                    break
+
+            except HTTPError as error:
+                self.logger.warning("HTTP error from %s: %s %s - %s", self.client_address, error.status_code, error.reason, error)
+
+                error_response = self._make_error_response(error.status_code, error.reason, close_connection=error.close_connection)
+
+                if not self._send_response(error_response):
+                    break
+
+                if error.close_connection:
+                    break
+
+                continue
 
     def _receive_http_request(self):
         while HEADER_SEPARATOR not in self.buffer:
@@ -62,8 +91,11 @@ class ClientConnection:
 
         content_length_values = []
 
-        header_text = header_data.decode("utf-8")
-
+        try:
+            header_text = header_data.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise BadRequestError("HTTP header could not be decoded as UTF-8.", close_connection=True) from error
+        
         for line in header_text.splitlines():
             if line.lower().startswith("content-length:"):
                 value = line.split(":", 1)[1].strip()
@@ -133,3 +165,24 @@ class ClientConnection:
             raise
         except OSError as error:
             raise ClientConnectionError(f"Socket receive failed {error}") from error
+
+    def _make_error_response(self, status_code, reason, close_connection=False):
+        headers = [
+            ("Content-Type", "text/plain; charset=utf-8")
+        ]
+
+        if close_connection:
+            headers.append(("Connection", "close"))
+
+        body = f"{status_code} {reason}"
+
+        return Response(body=body, status_code=status_code, headers=headers)
+
+    def _send_response(self, response):
+        try:
+            self.socket.sendall(response.to_bytes())
+        except OSError as error:
+            self.logger.warning("Failed to send response to %s: %s. Closing connection.", self.client_address, error)
+            return False
+
+        return True

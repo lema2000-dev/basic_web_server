@@ -10,7 +10,7 @@ def test_http_error():
     errors =  [
         (BadRequestError, 400, "Bad Request"),
         (RequestTimeoutError, 408, "Request Timeout"),
-        (RequestTooLargeError, 431, "Content Too Large"),
+        (RequestTooLargeError, 413, "Content Too Large"),
         (HTTPVersionNotSupportedError, 505, "HTTP Version Not Supported"),
     ]
 

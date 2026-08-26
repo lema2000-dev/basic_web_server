@@ -6,6 +6,9 @@ STATUS_REASONS = {
     201: "Created",
     400: "Bad Request",
     404: "Not Found",
+    408: "Request Timeout",
+    413: "Content Too Large",
     500: "Internal Server Error",
+    505: "HTTP Version Not Supported",
 }
 

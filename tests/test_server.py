@@ -3,6 +3,7 @@ import threading
 import time
 import socket
 import errno
+import logging
 
 from basic_web_server import Server
 
@@ -233,32 +234,36 @@ def test_server_waits_for_client_threads_on_shutdown():
 
     release_thread.join()
 
-def test_server_continues_after_recoverable_accept_error(monkeypatch):
+def test_server_continues_after_recoverable_accept_error(monkeypatch, caplog):
     server = Server(application)
 
     recoverable_socket = RecoverableAcceptErrorSocket(server)
 
     monkeypatch.setattr(socket, "socket", lambda *args, **kwargs: recoverable_socket)
 
-    server._server()
+    with caplog.at_level(logging.WARNING, logger="basic_web_server"):
+        server._server()
 
     assert recoverable_socket.accept_calls == 2
     assert recoverable_socket.closed
     assert not server._running
+    assert any(record.levelno == logging.WARNING and "Recoverable accept error" in record.getMessage() for record in caplog.records)
 
-def test_server_stops_after_fatal_accept_error(monkeypatch):
+def test_server_stops_after_fatal_accept_error(monkeypatch, caplog):
     server = Server(application)
 
     fatal_socket = FatalAcceptErrorSocket()
 
     monkeypatch.setattr(socket, "socket", lambda *args, **kwargs: fatal_socket)
 
-    server._server()
+    with caplog.at_level(logging.ERROR, logger="basic_web_server"):
+        server._server()
 
     assert fatal_socket.accept_calls == 1
     assert fatal_socket.closed
     assert not server._running
     assert server._socket is None
+    assert any(record.levelno == logging.ERROR and "Fatal accept error" in record.getMessage() for record in caplog.records)
 
 def test_server_handles_bind_error(monkeypatch):
     server = Server(application)
@@ -273,17 +278,18 @@ def test_server_handles_bind_error(monkeypatch):
     assert not server._running
     assert server._socket is None
 
-def test_run_handles_server_thread_start_error(monkeypatch):
+def test_run_handles_server_thread_start_error(monkeypatch, caplog):
     server = Server(application)
 
     monkeypatch.setattr(threading, "Thread", StartErrorThread)
-
-    server._run(host="127.0.0.1", port=5000)
+    with caplog.at_level(logging.ERROR, logger="basic_web_server"):
+        server._run(host="127.0.0.1", port=5000)
 
     assert not server._running
     assert server._server_thread is None
+    assert any(record.levelno == logging.ERROR and "Failed to start server thread" in record.getMessage() for record in caplog.records)
 
-def test_server_handles_client_thread_start_error(monkeypatch):
+def test_server_handles_client_thread_start_error(monkeypatch, caplog):
     server = Server(application)
 
     fake_client_socket = FakeClientSocket()
@@ -293,13 +299,15 @@ def test_server_handles_client_thread_start_error(monkeypatch):
     monkeypatch.setattr(socket, "socket", lambda *args, **kwargs: client_thread_error_socket)
     monkeypatch.setattr(threading, "Thread", ClientStartErrorThread)
 
-    server._server()
+    with caplog.at_level(logging.ERROR, logger="basic_web_server"):
+        server._server()
 
     assert fake_client_socket.closed
     assert server._client_threads == []
     assert client_thread_error_socket.accept_calls == 2
     assert client_thread_error_socket.closed
     assert not server._running
+    assert any(record.levelno == logging.ERROR and "Failed to start client thread" in record.getMessage() for record in caplog.records)
 
 def test_command_run_rejects_invalid_ip(monkeypatch):
     server = Server(application)
@@ -377,4 +385,21 @@ def test_command_run_accepts_valid_input(monkeypatch):
 
     assert received_arguments == {"host": "127.0.0.1", "port": 5000}
 
-    
+def test_server_has_logger():
+    server = Server(application)
+
+    assert server.logger is not None
+
+def test_server_logs_startup_error(monkeypatch, caplog):
+    server = Server(application)
+
+    def raise_socket_error(*args, **kwargs):
+        raise OSError("Simulated startup failure")
+
+    monkeypatch.setattr(socket, "socket", raise_socket_error)
+
+    with caplog.at_level(logging.ERROR, logger="basic_web_server"):
+        server._server()
+
+    assert any(record.levelno == logging.ERROR and "Failed to start server" in record.getMessage() for record in caplog.records)
+    assert "Simulated startup failure" in caplog.text

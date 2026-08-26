@@ -15,7 +15,7 @@ class RequestTimeoutError(HTTPError):
     reason = "Request Timeout"
 
 class RequestTooLargeError(HTTPError):
-    status_code = 431
+    status_code = 413
     reason = "Content Too Large" 
 
 class HTTPVersionNotSupportedError(HTTPError):

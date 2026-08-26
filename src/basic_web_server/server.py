@@ -1,4 +1,3 @@
-import re
 import socket
 import threading
 import errno
@@ -6,6 +5,7 @@ import ipaddress
 
 from .config import ServerConfig
 from .connection import ClientConnection
+from .logger import create_logger
 
 RECOVERABLE_ACCEPT_ERRNOS = {errno.ECONNABORTED}
 
@@ -19,6 +19,8 @@ class Server:
             config = ServerConfig()
 
         self.config = config
+        self.logger = create_logger()
+
         self._socket = None
         self._running = False
 
@@ -68,12 +70,12 @@ class Server:
                 self._socket.listen()
                 self._socket.settimeout(self.config.accept_timeout)
             except OSError as error:
-                print(f"Failed to start server on {self.host}:{self.port}: {error}")
+                self.logger.error("Failed to start server on %s:%s: %s", self.host, self.port, error)
                 return
 
             self._running = True
             host, port = self._socket.getsockname()
-            print(f"Server is listening on http://{host}:{port}")
+            self.logger.info("Server is listening on http://%s:%s", host, port)
 
             while self._running:
                 try:
@@ -86,9 +88,9 @@ class Server:
                     if not self._running:
                         break
                     if error.errno in RECOVERABLE_ACCEPT_ERRNOS:
-                        print(f"Recoverable accept error: {error}. Continuing to accept new connections.")
-                        continue   
-                    print(f'Fatal error whilr accepting connection: {error}')
+                        self.logger.warning("Recoverable accept error: %s. Continuing to accept new connections.", error)
+                        continue
+                    self.logger.error("Fatal accept error: %s.", error)   
                     break
 
                 client_thread = threading.Thread(
@@ -100,7 +102,7 @@ class Server:
                 try:
                     client_thread.start()
                 except RuntimeError as error:
-                    print(f"Failed to start client thread for {client_address}: {error}")
+                    self.logger.error("Failed to start client thread for %s: %s", client_address, error)
                     with self._client_threads_lock:
                         self._client_threads = [
                             (t, addr) for t, addr in self._client_threads if t is not client_thread
@@ -120,7 +122,7 @@ class Server:
             for client_thread in client_threads_copy:
                 client_thread.join()
 
-            print("Server stopped.")
+            self.logger.info("Server stopped.")
 
     def _run(self, host="127.0.0.1", port=0):
         self.host = host
@@ -129,7 +131,7 @@ class Server:
         try:
             self._server_thread.start()
         except RuntimeError as error:
-            print(f"Failed to start server thread: {error}")
+            self.logger.error("Failed to start server thread: %s", error)
             self._server_thread = None
 
     def _stop(self):
@@ -140,7 +142,7 @@ class Server:
     def _handle_client(self, client_socket, client_address):
         try:
             with client_socket:
-                connection = ClientConnection(client_socket, client_address, self.application, self.config)
+                connection = ClientConnection(client_socket, client_address, self.application, self.config, self.logger)
                 connection.handle()
         finally:
             current_thread = threading.current_thread()

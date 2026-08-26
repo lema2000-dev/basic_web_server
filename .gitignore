@@ -39,3 +39,7 @@ docs_private/
 
 .env
 .env.*
+
+# Logging
+
+*.log

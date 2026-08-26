@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 
 [project]
-name = "basic-web-server"
+name = "lema-basic-web-server"
 version = "0.1.0"
 description = "A minimal educational HTTP web server written in Python."
 readme = "README.md"

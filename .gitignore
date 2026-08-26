@@ -3,7 +3,9 @@
 .venv/
 venv/
 env/
-basic_web_server.egg-info/
+*.egg-info/
+dist/
+build/
 
 # Python gyorsítótár
 

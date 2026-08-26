@@ -1,12 +1,15 @@
 import logging
 
-def create_logger():
-    logger = logging.getLogger("basic_web_server")
 
+def create_logger(log_name, log_level):
+    logger = logging.getLogger(log_name)
+
+    # Avoid adding duplicate handlers when multiple Server objects are created.
     if logger.handlers:
-        return logger  # Logger already configured
+        return logger
 
-    logger.setLevel(logging.INFO)
+    logger.setLevel(log_level)
+
     formatter = logging.Formatter(
         "%(asctime)s | "
         "%(levelname)s | "

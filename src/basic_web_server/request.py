@@ -1,15 +1,15 @@
-from .http import HEADER_SEPARATOR
 from .exceptions import BadRequestError, HTTPVersionNotSupportedError
+from .http import HEADER_SEPARATOR
+
 
 class Request:
-
     def __init__(self, raw_data):
         self.raw_data = raw_data
 
         header_data, separator, body_data = raw_data.partition(HEADER_SEPARATOR)
-
         self.body = body_data
 
+        # Parse and validate the request head before exposing request attributes.
         try:
             header_text = header_data.decode("utf-8")
         except UnicodeDecodeError as error:
@@ -40,9 +40,9 @@ class Request:
         self.method = method
         self.target = target
         self.version = version
-
         self.path, separator, self.query_string = target.partition("?")
 
+        # Preserve repeated headers while normalizing their names for lookup.
         host_count = 0
         self.headers = []
 
@@ -63,10 +63,12 @@ class Request:
             self.headers.append((name.lower(), value))
 
         if host_count == 0:
-            raise BadRequestError("Host header is required in HTTP/1.1 requests.") 
+            raise BadRequestError("Host header is required in HTTP/1.1 requests.")
 
         if host_count > 1:
-            raise BadRequestError("Multiple Host headers are not allowed in HTTP/1.1 requests.")
+            raise BadRequestError(
+                "Multiple Host headers are not allowed in HTTP/1.1 requests."
+            )
 
     def get_header(self, name, default=None):
         normalized_name = name.lower()
@@ -79,14 +81,8 @@ class Request:
 
     def get_headers(self, name):
         normalized_name = name.lower()
-
-        return [value for header_name, value in self.headers if header_name == normalized_name]
-
-         
-
-        
-
-        
-
-
-    
+        return [
+            value
+            for header_name, value in self.headers
+            if header_name == normalized_name
+        ]

@@ -1,5 +1,10 @@
 # Basic Web Server
 
+[![PyPI version](https://img.shields.io/pypi/v/lema-basic-web-server.svg)](https://pypi.org/project/lema-basic-web-server/)
+[![Python versions](https://img.shields.io/pypi/pyversions/lema-basic-web-server.svg)](https://pypi.org/project/lema-basic-web-server/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Tests](https://github.com/lema2000-dev/basic_web_server/actions/workflows/tests.yml/badge.svg)](https://github.com/lema2000-dev/basic_web_server/actions/workflows/tests.yml)
+
 A small HTTP/1.1 web server written from scratch in Python for educational purposes.
 
 ## Purpose
